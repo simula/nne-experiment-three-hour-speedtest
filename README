@@ -6,14 +6,14 @@ Define Measurement Descriptor:
 
 # id, name, filemask, parameters, metadata_level, destination_table, executable, dependencies, container
 -- INSERT INTO measurement_descriptor VALUES ('16', 'Combined speedtest.net and web page load test', '', '/nne/measurements/speedtest/speedtest_run.py --mid %measurement_instance_id% --netid %network_id% --netif %node_device_network_if_name% --hour 2 14 19 --minute %network_id%', '0', 'report2017.speedtest_data', 'speedtest/speedtest_run.py', 'speedtest/speedtest_run.py,speedtest/bind.so.armv7l,speedtest/bind.so.x86_64,speedtest/loadspeed.js,speedtest/speedtest_cli.py,speedtest/wrap-nne-query-metadata', 'dreibh/speedtest');
-INSERT INTO measurement_descriptor VALUES ('20', '3-Hour speedtest', '', '/nne/measurements/speedtest/speedtest_run.py --mid %measurement_instance_id% --netid %network_id% --netif %node_device_network_if_name% --hour 0 3 6 9 12 15 18 --minute %network_id%', '0', 'report2017.speedtest_data', 'speedtest/speedtest_run.py', 'speedtest/speedtest_run.py,speedtest/bind.so.armv7l,speedtest/bind.so.x86_64,speedtest/loadspeed.js,speedtest/speedtest_cli.py,speedtest/wrap-nne-query-metadata', 'selwi/three-hour-speedtest');
+INSERT INTO measurement_descriptor VALUES ('17', '3-Hour speedtest', '', '/nne/measurements/speedtest/speedtest_run.py --mid %measurement_instance_id% --netid %network_id% --netif %node_device_network_if_name% --hour 0 3 6 9 12 15 18 --minute %network_id%', '0', 'report2017.speedtest_data', 'speedtest/speedtest_run.py', 'speedtest/speedtest_run.py,speedtest/bind.so.armv7l,speedtest/bind.so.x86_64,speedtest/loadspeed.js,speedtest/speedtest_cli.py,speedtest/wrap-nne-query-metadata', 'selwi/three-hour-speedtest');
 
 
 Define data columns for import:
 
-INSERT INTO measurement_column VALUES( 20, 'data', 'json', '.');
-INSERT INTO measurement_column VALUES( 20, 'mi_id', 'decimal', NULL);
-INSERT INTO measurement_column VALUES( 20, 'ts', 'datetime(6)', NULL);
+INSERT INTO measurement_column VALUES( 17, 'data', 'json', '.');
+INSERT INTO measurement_column VALUES( 17, 'mi_id', 'decimal', NULL);
+INSERT INTO measurement_column VALUES( 17, 'ts', 'datetime(6)', NULL);
 
 
 Define Measurement Instance on a Node:
