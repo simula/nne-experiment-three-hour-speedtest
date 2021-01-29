@@ -1,0 +1,323 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# =================================================================
+#          #     #                 #     #
+#          ##    #   ####   #####  ##    #  ######   #####
+#          # #   #  #    #  #    # # #   #  #          #
+#          #  #  #  #    #  #    # #  #  #  #####      #
+#          #   # #  #    #  #####  #   # #  #          #
+#          #    ##  #    #  #   #  #    ##  #          #
+#          #     #   ####   #    # #     #  ######     #
+#
+#       ---   The NorNet Testbed for Multi-Homed Systems  ---
+#                       https://www.nntb.no
+# =================================================================
+#
+# Container-based Speed Test for NorNet Edge
+#
+# Copyright (C) 2018-2019 by Thomas Dreibholz
+# Copyright (C) 2012-2017 by Džiugas Baltrūnas
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# Contact: dreibh@simula.no
+
+import argparse
+import json
+import logging
+import logging.config
+import lzma
+import netifaces
+import os
+import platform
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from collections import OrderedDict
+from datetime    import datetime
+
+
+
+# ###### Constants ##########################################################
+NET_MAP = {
+    1: '24201',
+    2: '24202',
+    4: '24205',
+    5: '24206',
+    6: '00000',
+   15: '24205',
+   18: '24214',
+   19: '24219',
+    0: '00000'   # Test only!
+}
+
+LOG_DIRECTORY  = '/monroe/results/log'
+DATA_DIRECTORY = '/monroe/results'
+
+
+# ###### Global variables ###################################################
+running  = True
+compress = True
+cwd      = os.path.dirname(os.path.realpath(sys.argv[0]))
+
+
+# ###### Scheduling #########################################################
+class At(object):
+   def __init__(self,
+                year=None, month=None, day=None, weekday=None,
+                hour=None, minute=None, second=None):
+      loc = locals()
+      loc.pop("self")
+      self.at = dict((k, v) for k, v in loc.items() if v != None)
+
+   def __contains__(self, now):
+      for k in list(self.at.keys()):
+         try:
+            if not getattr(now, k) in self.at[k]:
+               return False
+         except TypeError:
+            if self.at[k] != getattr(now, k):
+               return False
+      return True
+
+
+
+# ###### Signal handler #####################################################
+def signalHandler(signum, frame):
+   global running
+   running = False
+
+
+# ###### Run test ###########################################################
+def run(cmds):
+   global cwd
+   env = dict(os.environ)
+   res = OrderedDict()
+   try:
+      sip = netifaces.ifaddresses(options.iface)[netifaces.AF_INET][0]['addr']
+   except:
+      sys.stderr.write('ERROR: Unable to determine IP address of interface ' + options.iface + '!\n')
+      return
+
+   env['LD_PRELOAD']  = '%s/bind.so.%s' % ( cwd, platform.machine() )
+   env['BIND_ADDR']   = sip
+   env['NAMESERVER1'] = '8.8.8.8'
+   env['PATH']        = '%s:%s' % ( env['PATH'], cwd )
+
+   seqnum = 0
+
+   for cmd in cmds:
+      now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S.%f')
+      try:
+         cmd_name, cmd_args = cmd
+         proc = subprocess.Popen(cmd_args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+         stdout, stderr = proc.communicate()
+
+         # ------ Get result (parse JSON) -----------------------------------
+         if proc.returncode == 0:
+            resultString = stdout.decode('utf-8')
+            s = resultString.find('BEGIN-JSON\n', 0)
+            e = resultString.rfind('\nEND-JSON\n', 0)
+
+            # ------ Extract the JSON between BEGIN-JSON and END-JSON -------
+            if ((s >= 0) and (e >= 0)):
+               jsonString = resultString[s + 11:e]
+               try:
+                  res[cmd_name] = json.loads(jsonString)
+               except Exception as e:
+                  res[cmd_name] = {
+                     'status':    'exception',
+                     'jsonError': str(e)
+                  }
+
+            # ------ JSON-only result (without BEGIN-JSON and END-JSON) -----
+            elif ((s < 0) and (e < 0)):
+               try:
+                  res[cmd_name] = json.loads(resultString)
+               except Exception as e:
+                  res[cmd_name] = {
+                     'status':    'exception',
+                     'jsonError': str(e)
+                  }
+
+            # ------ There is no JSON?! -------------------------------------
+            else:
+               print(resultString)
+               res[cmd_name] = {
+                  'status':    'exception',
+                  'jsonError': 'No JSON found!'
+               }
+
+         # ------ Handle non-zero exit code ---------------------------------
+         else:
+            res[cmd_name] = {
+               'status':      'error',
+               'exitCode':    proc.returncode,
+               'exitMessage': str(stderr.decode('utf-8'))
+            }
+            continue
+
+      except Exception as e:
+         res[cmd_name] = {
+            'status':      'exception',
+            'exitMessage': str(e)
+         }
+
+      # print(cmd)
+      # print(res)
+
+   # ------ Write the results -----------------------------------------------
+   jsonDump = json.dumps(res)
+   # jsonDump = json.dumps(res, indent=4, separators=(',', ': '))
+   mlogger.info('%s\t%d\t%d\t%s' % (now, options.instance, seqnum, jsonDump))
+
+   # ------ Perform explicit log rollover -----------------------------------
+   for h in mlogger.handlers:
+      h.doRollover()
+
+
+# ###### Compressing log rotator ############################################
+def CompressingRotator(source, dest):
+   os.rename(source, dest)
+   f_in = open(dest, 'rb')
+   f_out = lzma.LZMAFile('%s.xz' % dest, 'wb')
+   f_out.writelines(f_in)
+   f_out.close()
+   f_in.close()
+   os.remove(dest)
+
+
+
+# ###### Main program #######################################################
+
+# ====== Handle arguments ===================================================
+ap = argparse.ArgumentParser(description='SpeedTest for NorNet Edge')
+ap.add_argument('-i', '--instance',     help='Measurement instance ID',      type=int, required=True)
+ap.add_argument('-N', '--network_id',   help='Network identifier',           required=True, type=int, default=None)
+ap.add_argument('-I', '--iface',        help='Interface name',               required=True)
+ap.add_argument('-u', '--uncompressed', help='Turn off results compression', action='store_true', default=False)
+ap.add_argument('--once',   help='Run tests once, then exit',   action='store_true', default=False)
+ap.add_argument('--coords', help='GPS coordinates: LAT,LON',    default='59.913869,10.752245')   # Oslo sentrum
+ap.add_argument('--url1',   help='URL #1 to fetch',             default='https://m.nrk.no/')
+ap.add_argument('--url2',   help='URL #2 to fetch',             default='https://www.vg.no/')
+ap.add_argument('--hour',   type=int, nargs='+', required=True, default=[ 1, 13, 18 ])
+ap.add_argument('--minute', type=int, nargs='+', required=True, default=[ 0 ])
+options = ap.parse_args()
+
+if options.uncompressed == True:
+   compress = False
+
+try:
+   mccmnc = NET_MAP[options.network_id]
+except:
+   print(NET_MAP)
+   print(options.network_id)
+   sys.stderr.write('ERROR: Invalid network identifier (not in NET_MAP)!\n')
+   sys.exit(1)
+
+
+# ====== Initialise logger ==================================================
+MBBM_LOGGING_CONF = {
+   'version': 1,
+   'handlers': {
+      'default': {
+         'level': 'DEBUG',
+         'class': 'logging.handlers.TimedRotatingFileHandler',
+         'formatter': 'standard',
+         'filename': (LOG_DIRECTORY + '/speedtest_%d.log') % (options.instance),
+         'when': 'D'
+      },
+      'mbbm': {
+         'level': 'DEBUG',
+         'class': 'logging.handlers.TimedRotatingFileHandler',
+         'formatter': 'mbbm',
+         'filename': (DATA_DIRECTORY + '/speedtest_%d.sdat') % (options.instance),
+         'when': 'S',
+         'interval': 24*3600   # The log rotation is performed explicitly after each measurement!
+      }
+   },
+   'formatters': {
+      'standard': {
+         'format': '%(asctime)s %(levelname)s [PID=%(process)d] %(message)s'
+      },
+      'mbbm': {
+         'format': '%(message)s',
+      }
+   },
+   'loggers': {
+      'mbbm': {
+         'handlers': ['mbbm'],
+         'level': 'DEBUG',
+         'propagate': False,
+      }
+   },
+   'root': {
+      'level': 'DEBUG',
+      'handlers': ['default'],
+   }
+}
+
+logging.config.dictConfig(MBBM_LOGGING_CONF)
+mlogger = logging.getLogger('mbbm')
+if compress == True:
+   for loghandler in mlogger.handlers[:]:
+      loghandler.rotator = CompressingRotator
+
+
+# ====== Initialise signal handlers =========================================
+signal.signal(signal.SIGINT,  signalHandler)
+signal.signal(signal.SIGTERM, signalHandler)
+
+
+# ====== Run the tests ======================================================
+cmds = [
+   ( 'metadatab', [ 'wrap-nne-query-metadata', mccmnc ] ),
+
+   # ------ SpeedTest CLI ---------------------------------------------------
+   # NOTE: We need to run the *old* version of the speed test!
+   ( 'speedtest', [ 'speedtest_cli-0.3.4', '--simple', '--json', '--coords', options.coords ] ),
+   # This whould be the new version, but with a different JSON format:
+   # !!! ( 'speedtest', [ 'speedtest_cli-2.1.1', '--json', '--coords', options.coords ] ),
+
+   # ------ Webload ---------------------------------------------------------
+   # ( 'webload11', [ 'phantomjs', '--ignore-ssl-errors=true', '%s/loadspeed.js' % (cwd), options.url1 ] ),
+   # ( 'webload12', [ 'phantomjs', '--ignore-ssl-errors=true', '%s/loadspeed.js' % (cwd), options.url1 ] ),
+   # ( 'webload13', [ 'phantomjs', '--ignore-ssl-errors=true', '%s/loadspeed.js' % (cwd), options.url1 ] ),
+   # ( 'webload21', [ 'phantomjs', '--ignore-ssl-errors=true', '%s/loadspeed.js' % (cwd), options.url2 ] ),
+   # ( 'webload22', [ 'phantomjs', '--ignore-ssl-errors=true', '%s/loadspeed.js' % (cwd), options.url2 ] ),
+   # ( 'webload23', [ 'phantomjs', '--ignore-ssl-errors=true', '%s/loadspeed.js' % (cwd), options.url2 ] ),
+
+   # ------ Dash ------------------------------------------------------------
+   # ( 'metadatai', [ 'wrap-nne-query-metadata', mccmnc ] ),
+   # ( 'dash',      [ 'dash', ] ),
+
+   ( 'metadataa', [ 'wrap-nne-query-metadata', mccmnc ] )
+]
+
+
+if not options.once:
+   event = At(hour=options.hour, minute=options.minute)
+   while running:
+      if datetime.utcnow() in event:
+         run(cmds)
+         time.sleep(59)   # Make sure that the commands are not run again in the same minute!
+      time.sleep(1)
+
+else:
+   run(cmds)
+
+sys.exit()
